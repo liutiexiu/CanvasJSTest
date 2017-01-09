@@ -1,9 +1,9 @@
 diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/java/com/xiaomi/micloud/controllers/MyChartController.java b/Micloud-BaseServices/MicloudAPI-Find/src/main/java/com/xiaomi/micloud/controllers/MyChartController.java
 new file mode 100644
-index 0000000..ba5a86b
+index 0000000..93baab9
 --- /dev/null
 +++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/java/com/xiaomi/micloud/controllers/MyChartController.java
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,602 @@
 +package com.xiaomi.micloud.controllers;
 +
 +import com.xiaomi.micloud.common.ExceptionHelper;
@@ -31,14 +31,18 @@ index 0000000..ba5a86b
 +import java.io.InputStream;
 +import java.io.InputStreamReader;
 +import java.io.OutputStreamWriter;
++import java.net.URLDecoder;
 +import java.util.ArrayList;
 +import java.util.Collections;
 +import java.util.List;
 +import java.util.Map;
 +import java.util.Properties;
++import java.util.Set;
 +import java.util.TreeMap;
++import java.util.TreeSet;
 +import java.util.regex.Matcher;
 +import java.util.regex.Pattern;
++import java.util.stream.Collectors;
 +
 +/**
 + * Created by liushuai on 16-12-23.
@@ -59,6 +63,11 @@ index 0000000..ba5a86b
 +        return "upload.html";
 +    }
 +
++    @Get("compare")
++    public String compare(Invocation inv) {
++        return "compare.html";
++    }
++
 +    @Post("upload")
 +    public String uploadFile(Invocation inv,
 +                             @Param("directory") String directory,
@@ -68,6 +77,7 @@ index 0000000..ba5a86b
 +                             @Param("type") String chartType,
 +                             @Param("x_start") int xStartIndex,
 +                             @Param("x_end") int xEndIndex,
++                             @Param("x_filter") String xFilter,
 +                             @Param("x_format") String xFormat,
 +                             @Param("label_unit") String labelUnit,
 +                             @Param("y") int yIndex,
@@ -101,6 +111,7 @@ index 0000000..ba5a86b
 +                writer.append("type=" + chartType + "\n")
 +                      .append("x_start=" + xStartIndex + "\n")
 +                      .append("x_end=" + xEndIndex + "\n")
++                      .append("x_filter=" + xFilter + "\n")
 +                      .append("x_format=" + xFormat + "\n")
 +                      .append("y=" + yIndex + "\n")
 +                      .append("y_unit_format=" + yUnitFormat + "\n")
@@ -139,8 +150,19 @@ index 0000000..ba5a86b
 +        return "@json:" + list;
 +    }
 +
++    @Get("folder/list")
++    public String listFolderFiles(Invocation inv,
++                                  @Param("folderName") String folderName) throws IOException {
++        List<String> list = new ArrayList<>();
++        for (String fileName : filesInFolder(folderName)) {
++            list.add("\"" + fileName + "\"");
++        }
++        Collections.sort(list);
++        return "@json:" + list;
++    }
++
 +    @Get("list")
-+    public String listResultFiles(Invocation inv) {
++    public String listResultFiles(Invocation inv) throws IOException {
 +        StringBuilder sb = new StringBuilder();
 +        for (String folder : currentFileList(PATH, false)) {
 +            addHref(sb, filesInFolder(folder), folder, folder);
@@ -149,6 +171,21 @@ index 0000000..ba5a86b
 +
 +        return "@html:<html><head><title>chart list</title></head>" +
 +                "<body><div><h3>图列表</h3></div>" + sb.toString() + "</body></html>";
++    }
++
++    @Get("list/model")
++    public String listModels(Invocation inv,
++                             @Param("folderName") String inputFolderName,
++                             @Param("fileName") String inputFile) throws IOException {
++        final String folderName = URLDecoder.decode(inputFolderName, "UTF-8");
++        final String fileName = URLDecoder.decode(inputFile, "UTF-8");
++
++        List<String> list = new ArrayList<>();
++        List<String> modelList = readFirstColumn(new FileInputStream(PATH + "/" + folderName + "/" + fileName));
++        for (String model : modelList) {
++            list.add("\"" + model + "\"");
++        }
++        return "@json:" + list.stream().distinct().collect(Collectors.toList());
 +    }
 +
 +    @Get("chart-{folder:.+}")
@@ -165,18 +202,65 @@ index 0000000..ba5a86b
 +
 +        LOGGER.debug("properties:{}", properties);
 +
-+        ChartObject chartObject = toChart(properties.getProperty("type"),
-+                                          folderName,
-+                                          folderName,
-+                                          fileName,
-+                                          NumberUtils.toInt(properties.getProperty("x_start")),
-+                                          NumberUtils.toInt(properties.getProperty("x_end")),
-+                                          NumberUtils.toInt(properties.getProperty("y")),
-+                                          properties.getProperty("x_format"),
-+                                          properties.getProperty("y_unit_format"),
-+                                          properties.getProperty("y_unit"),
-+                                          properties.getProperty("label_unit"));
-+        return chartObject.toHtml();
++        return generateChartObject(folderName, fileName, properties, false).toHtml();
++    }
++
++    @Get("chart-compare")
++    public String compareCharts(Invocation inv,
++                                @Param("folder") String inputFolderName,
++                                @Param("file1") String inputFile1,
++                                @Param("file2") String inputFile2,
++                                @Param("model") String inputModel) throws IOException, OpBadRequestException {
++        final String folderName = URLDecoder.decode(inputFolderName, "UTF-8");
++        final String file1 = URLDecoder.decode(inputFile1, "UTF-8");
++        final String file2 = URLDecoder.decode(inputFile2, "UTF-8");
++        final String model = URLDecoder.decode(inputModel, "UTF-8");
++
++        LOGGER.debug("input folder:{}, decoded:{}", inputFolderName, folderName);
++
++        List<String> countList = filesInFolder(folderName);
++        if (!countList.contains(file1)) {
++            return toHtmlResult("出错了！！！", "h2", "没找到文件:" + file1);
++        }
++        if (!countList.contains(file2)) {
++            return toHtmlResult("出错了！！！", "h2", "没找到文件:" + file2);
++        }
++
++        Properties properties = new Properties();
++        properties.load(new InputStreamReader(new FileInputStream(PATH + "/" + folderName + "/" + CONFIG_FILE), "UTF-8"));
++
++        LOGGER.debug("properties:{}", properties);
++
++        ChartObject chart1 = generateChartObject(folderName, file1, properties, true);
++        ChartObject chart2 = generateChartObject(folderName, file2, properties, true);
++
++        ChartObject chartObject = chart1;
++        chartObject.pageTitle = String.format("[compare]%s-%s", model, folderName);
++        chartObject.chartTitle = String.format("对比[%s]", folderName);
++
++        Pattern namePattern = Pattern.compile("name:.+\"(.+)\",");
++
++        List<String> dataList = new ArrayList<>();
++        chart1.dataList.forEach(data -> {
++            Matcher matcher = namePattern.matcher(data);
++            LOGGER.debug("data:[{}]", data);
++            if (matcher.find() && matcher.group(1).startsWith(model)) {
++                dataList.add(data);
++            }
++        });
++        chart2.dataList.forEach(data -> {
++            Matcher matcher = namePattern.matcher(data);
++            if (matcher.find() && matcher.group(1).startsWith(model)) {
++                dataList.add(data);
++            }
++        });
++        chartObject.dataList = dataList;
++
++        final String script = IOUtils.toString(getClass().getResource("/v-more-compare.js"));
++
++        return chartObject.toHtml()
++                          .replace("$more_script", script)
++                          .replace("//:more_script ", "");
 +    }
 +
 +    private void addHref(StringBuilder sb, List<String> fileNameList, String type, String typeDisplayName) {
@@ -189,17 +273,40 @@ index 0000000..ba5a86b
 +        sb.append("</div>");
 +    }
 +
++    private ChartObject generateChartObject(String folderName, String fileName, Properties properties, boolean withFileName)
++            throws IOException, OpBadRequestException {
++        return toChart(properties.getProperty("type"),
++                       folderName,
++                       folderName,
++                       fileName,
++                       NumberUtils.toInt(properties.getProperty("x_start")),
++                       NumberUtils.toInt(properties.getProperty("x_end")),
++                       NumberUtils.toInt(properties.getProperty("y")),
++                       properties.getProperty("x_filter"),
++                       properties.getProperty("x_format"),
++                       properties.getProperty("x_type"),
++                       properties.getProperty("y_format"),
++                       properties.getProperty("y_unit_format"),
++                       properties.getProperty("y_unit"),
++                       properties.getProperty("label_unit"),
++                       withFileName);
++    }
++
 +    private String toHtmlResult(String title, String fontSize, String message) {
 +        return String.format("@html:<html><head><title>%s</title></head><%s>%s</%s></html>",
 +                             title, fontSize, message, fontSize);
 +    }
 +
-+    private List<String> filesInFolder(String type) {
++    private List<String> filesInFolder(String type) throws IOException {
++        LOGGER.debug("type:{}", type);
 +        return currentFileList(PATH + "/" + type, false);
 +    }
 +
-+    private List<String> currentFileList(String path, boolean showHidden) {
++    private List<String> currentFileList(String path, boolean showHidden) throws IOException {
 +        File file = new File(path);
++        if (file == null || !file.exists()) {
++            throw new IOException("path not found, " + path);
++        }
 +        List<String> list = new ArrayList<>();
 +        for (File f : file.listFiles()) {
 +            if (f.getName().startsWith("_") && !showHidden) {
@@ -208,15 +315,18 @@ index 0000000..ba5a86b
 +            list.add(f.getName());
 +        }
 +        Collections.sort(list);
++
 +        return list;
 +    }
 +
 +    private ChartObject toChart(
-+            String type, String title, String folderName, String fileName, int xStart, int xEnd, int y,
-+            String xRowRegex, String yUnitFormat, String yUnit, String labelUnit)
++            String type, String title, String folderName, String fileName, int xStart, int xEnd, int y, String xFilter,
++            String xRowRegex, String xType, String yValueFormat, String yUnitFormat, String yUnit, String labelUnit, boolean withFileName)
 +            throws IOException, OpBadRequestException {
 +        // 如果设置了y,是狭长表
 +        boolean isNarrowChart = y > 0;
++
++        Set<String> filterSet = toFilterSet(xFilter);
 +
 +        ResultObject resultObject = ResultObject.readFromStream(
 +                new FileInputStream(PATH + "/" + folderName + "/" + fileName), xStart, xEnd, y, isNarrowChart);
@@ -244,6 +354,8 @@ index 0000000..ba5a86b
 +            }
 +        }
 +
++        Pattern yValuePattern = StringUtils.isEmpty(yValueFormat) ? null : Pattern.compile(yValueFormat);
++
 +        final String valueTemplate = IOUtils.toString(getClass().getResource("/value-template.txt"));
 +        List<String> chartList = new ArrayList<>();
 +        for (ResultLineObject lineObject : resultObject.lines) {
@@ -251,6 +363,12 @@ index 0000000..ba5a86b
 +            for (int i = 0; i < lineObject.columns.length; i++) {
 +                if (isNarrowChart) {
 +                    String[] kv = lineObject.columns[i].split(",");
++
++                    if (filterSet.contains(kv[0])) {
++                        LOGGER.debug("skip this row:{}", kv);
++                        continue;
++                    }
++
 +                    String x = "";
 +                    Matcher matcher = pattern.matcher(kv[0]);
 +                    if (matcher.find()) {
@@ -259,32 +377,91 @@ index 0000000..ba5a86b
 +                        LOGGER.warn("bad column:{}, pattern:{}", kv[0], pattern);
 +                    }
 +
-+                    valueList.add(String.format("{ x: %s, y: %s, label: \"%s\" }",
-+                                                String.valueOf(x), kv[1], x + labelUnit));
++                    valueList.add(String.format("{ x: %s, y: %s }",
++                                                "Date".equalsIgnoreCase(xType) ?
++                                                        String.format(
++                                                                "new Date(%s,%d,%s)",
++                                                                x.substring(0,4), Integer.valueOf(x.substring(4,6)) - 1, x.substring(6))
++                                                        : String.valueOf(x),
++                                                findRegex(yValuePattern, kv[1]),
++                                                StringUtils.isEmpty(labelUnit) ? "" : ", label: \"" + x + labelUnit + "\""));
 +                } else {
 +                    valueList.add(String.format("{ x: %s, y: %s, label: \"%s\" }",
-+                                                String.valueOf(xValues[i]), lineObject.columns[i], xLabels[i]));
++                                                String.valueOf(xValues[i]),
++                                                findRegex(yValuePattern, lineObject.columns[i]),
++                                                xLabels[i]));
 +                }
 +            }
 +
 +            chartList.add(valueTemplate.replace("$type", type)
-+                                       .replace("$name", lineObject.model)
-+                                       .replace("$x_value_format", "")
++                                       .replace("$name", lineObject.model + (withFileName ? String.format("-in(%s)", fileName) : ""))
 +                                       .replace("$data_json_array", valueList.toString()));
 +        }
 +
 +        ChartObject chartObject = new ChartObject();
 +        chartObject.pageTitle = "图:" + fileName;
-+        chartObject.chartTitle = title;
++        chartObject.chartTitle = title + "(" + fileName + ")";
++        if ("Date".equalsIgnoreCase(xType)) {
++            chartObject.axisXValueFormat = "MMMdd";
++            chartObject.axisXInterval = "1";
++            chartObject.axisXIntervalType = "day";
++        }
++        if ("%".equalsIgnoreCase(xType)) {
++            chartObject.axisXValueFormat = "#%";
++        }
 +        chartObject.axisYValueFormat = yUnitFormat;
 +        chartObject.yValueUnit = yUnit;
 +        chartObject.dataList = chartList;
++
 +        return chartObject;
++    }
++
++    private static String findRegex(Pattern pattern, String input) {
++        if (pattern != null) {
++            Matcher matcher = pattern.matcher(input);
++            if (matcher.find()) {
++                return matcher.group(1);
++            }
++        }
++        return input;
++    }
++
++    private static List<String> readFirstColumn(InputStream inputStream) throws IOException {
++        List<String> list = new ArrayList<>();
++        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
++        try {
++            String line = reader.readLine();
++            while (line != null) {
++                list.add(line.split("\t")[0]);
++                line = reader.readLine();
++            }
++        } finally {
++            IOUtils.closeQuietly(reader);
++        }
++        return list;
++    }
++
++    private static Set<String> toFilterSet(String filter) {
++        if (StringUtils.isEmpty(filter)) {
++            return Collections.emptySet();
++        }
++
++        String[] filters = filter.split(",");
++        Set<String> set = new TreeSet<>();
++        for(String f : filters) {
++            if (StringUtils.isNotEmpty(f.trim())) {
++                set.add(f.trim());
++            }
++        }
++        return set;
 +    }
 +
 +    public static class ChartObject {
 +        public String pageTitle;
 +        public String chartTitle;
++        public String axisXValueFormat = "";
++        public String axisXInterval = "";
++        public String axisXIntervalType = "";
 +        public String axisYValueFormat = "";
 +        public String yValueUnit = "";
 +        public String axisYMaximum = "";
@@ -292,17 +469,33 @@ index 0000000..ba5a86b
 +
 +        public String toHtml() throws IOException {
 +
-+            String template = "@html:" + IOUtils.toString(MyChartController.class.getResourceAsStream("/distribution-template.html"))
++            String template = "@html:" + IOUtils.toString(MyChartController.class.getResourceAsStream("/v-chart-template.html"))
 +                                                .replace("$page_title", pageTitle)
 +                                                .replace("$chart_title", chartTitle)
-+//                                     .replace("$axis_x_value_format", axisXValueFormat)
++                                                .replace("$axis_x_value_format", axisXValueFormat)
++                                                .replace("$axis_x_interval", axisXInterval)
++                                                .replace("$axis_x_type_interval", axisXIntervalType)
 +//                                     .replace("$axis_x_maximum", axisXMaximum)
-+//                                     .replace("$axis_x_interval", axisXInterval)
 +                                                .replace("$axis_y_value_format", axisYValueFormat)
 +                                                .replace("$y_unit", yValueUnit)
 +                                                .replace("$axis_y_maximum", axisYMaximum)
 +//                                     .replace("$axis_y_interval", axisYInterval)
 +                                                .replace("$data_json_array", dataList.toString());
++
++            if (axisXValueFormat.length() > 0) {
++                LOGGER.warn("enable axis_x_value_format");
++                template = template.replaceAll("//:axis_x_value_format ", "");
++            }
++
++            if (axisXInterval.length() > 0) {
++                LOGGER.warn("enable axis_x_interval");
++                template = template.replaceAll("//:axis_x_interval ", "");
++            }
++
++            if (axisXIntervalType.length() > 0) {
++                LOGGER.warn("enable axis_x_type_interval");
++                template = template.replaceAll("//:axis_x_type_interval ", "");
++            }
 +
 +            if (axisYValueFormat.length() > 0) {
 +                LOGGER.warn("enable axis_y_value_format");
@@ -323,7 +516,8 @@ index 0000000..ba5a86b
 +        public List<ResultLineObject> lines = new ArrayList<>();
 +
 +        public static ResultObject readFromStream(
-+                InputStream inputStream, final int column1, final int column2, final int column3, final boolean isNarrow)
++                InputStream inputStream, final int column1, final int column2, final int column3,
++                final boolean isNarrow)
 +                throws IOException, OpBadRequestException {
 +            ResultObject resultObject = new ResultObject();
 +            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
@@ -412,12 +606,23 @@ index 0000000..ba5a86b
 +        }
 +    }
 +}
-diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/distribution-template.html b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/distribution-template.html
+diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo
 new file mode 100644
-index 0000000..d9434be
+index 0000000..f3b9152
 --- /dev/null
-+++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/distribution-template.html
-@@ -0,0 +1,77 @@
++++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo
+@@ -0,0 +1,4 @@
++model 	device_count 	avg_count 	05_count 	10_count 	15_count 	20_count 	25_count 	30_count 	35_count 	40_count 	45_count 	50_count 	55_count 	60_count 	65_count 	70_count 	75_count 	80_count 	85_count 	90_count 	95_count 	96_count 	97_count 	98_count 	99_count 	100_count 	total_time_per_device 	05_time 	10_time 	15_time 	20_time 	25_time 	30_time 	35_time 	40_time 	45_time 	50_time 	55_time 	60_time 	65_time 	70_time 	75_time 	80_time 	85_time 	90_time 	95_time 	96_time 	97_time 	98_time 	99_time 	100_time
++MI4LTE 	115068 	88.7 	5.0 	10.0 	16.0 	22.0 	28.0 	34.0 	41.0 	48.0 	56.0 	65.0 	74.0 	85.0 	97.0 	111.0 	126.0 	145.0 	167.0 	199.0 	251.0 	268.0 	290.0 	320.0 	369.33 	1855.0 	34.33s 	1.46s 	3.12s 	4.92s 	6.76s 	8.77s 	10.82s 	13.03s 	15.4s 	18.03s 	20.97s 	24.24s 	27.97s 	32.17s 	37.28s 	43.45s 	51.1s 	61.48s 	76.4s 	105.94s 	116.88s 	132.6s 	156.03s 	210.93s 	1293.37s
++MINOTELTE 	85237 	96.94 	6.0 	13.0 	20.0 	27.0 	34.0 	42.0 	49.0 	57.0 	66.0 	75.0 	85.0 	97.0 	109.0 	123.0 	138.0 	156.0 	178.0 	209.0 	259.0 	276.0 	295.0 	324.0 	366.0 	1132.0 	35.5s 	1.8s 	3.84s 	5.9s 	7.98s 	10.08s 	12.34s 	14.68s 	17.22s 	19.96s 	22.94s 	26.24s 	29.97s 	34.28s 	39.19s 	45.03s 	52.29s 	62.22s 	77.11s 	104.98s 	115.7s 	129.19s 	153.21s 	205.2s 	1877.79s
++MI5 	82262 	76.57 	7.0 	13.0 	19.0 	24.2 	30.0 	35.0 	41.0 	47.0 	53.0 	60.0 	67.0 	75.0 	83.0 	94.0 	106.0 	120.0 	138.0 	161.0 	202.0 	215.0 	232.0 	256.0 	297.0 	925.0 	26.5s 	1.68s 	3.37s 	4.98s 	6.5s 	8.03s 	9.58s 	11.22s 	12.99s 	14.85s 	16.85s 	19.02s 	21.43s 	24.26s 	27.64s 	31.64s 	36.89s 	43.94s 	54.74s 	76.97s 	85.41s 	97.63s 	116.96s 	168.48s 	1098.47s
+\ No newline at end of file
+diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-chart-template.html b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-chart-template.html
+new file mode 100644
+index 0000000..8627f1b
+--- /dev/null
++++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-chart-template.html
+@@ -0,0 +1,101 @@
 +﻿<!DOCTYPE HTML>
 +<html>
 +<head>
@@ -426,7 +631,7 @@ index 0000000..d9434be
 +			var chart = new CanvasJS.Chart("chartContainer1", {
 +				title: {
 +					text: "$chart_title",
-+					fontSize: 28
++					fontSize: 30
 +				},
 +				animationEnabled: true,
 +				axisX: {
@@ -434,21 +639,36 @@ index 0000000..d9434be
 +					tickColor: "silver",
 +					//:axis_x_value_format valueFormatString: "$axis_x_value_format",
 +					//:axis_x_maximum viewportMaximum: $axis_x_maximum,
-+					//:axis_x_interval interval: $axis_x_interval
++					//:axis_x_interval interval: $axis_x_interval,
++					//:axis_x_type_interval intervalType: "$axis_x_type_interval"
 +				},
 +				toolTip: {
-+					shared: true,
++					shared: false,
 +					contentFormatter: function (e) {
-+					    var content = "<" + e.entries[0].dataPoint.label + "><br>";
++					    var x = e.entries[0].dataPoint.label;
++					    if (!x) {
++					        x = e.entries[0].dataPoint.x;
++					    }
++					    var content = "<" + x + "><br>";
 +					    var yUnit = "";
 +					    //:y_unit yUnit="$y_unit";
++					    var dataList = [];
 +					    for (var i = 0; i < e.entries.length; i++) {
 +					        if (e.entries[i].dataSeries.visible) {
-+					            content += "<span style=\"color: " + e.entries[i].dataSeries.color + ";\">";
-+					            content += e.entries[i].dataSeries.name + "</span> ";
-+					            content += ": <strong>" + e.entries[i].dataPoint.y + yUnit + "</strong>";
-+					            content += "<br/>";
++					            dataList[i] = e.entries[i];
 +					        }
++					    }
++					    dataList.sort(function (a, b) {
++					        if (a.dataPoint.y > b.dataPoint.y)
++					            return -1;
++					        else
++					            return 1;
++					    });
++					    for (var i = 0; i < dataList.length; i++) {
++					        content += "<span style=\"color: " + dataList[i].dataSeries.color + ";\">";
++					        content += dataList[i].dataSeries.name + "</span> ";
++					        content += ": <strong>" + dataList[i].dataPoint.y + yUnit + "</strong>";
++					        content += "<br/>";
 +					    }
 +					    return content;
 +					}
@@ -456,7 +676,6 @@ index 0000000..d9434be
 +				theme: "theme2",
 +				axisY: {
 +					//:axis_y_value_format valueFormatString: "$axis_y_value_format",
-+
 +					//:axis_y_maximum maximum: $axis_y_maximum,
 +					//:axis_y_interval interval: $axis_y_interval,
 +					interlacedColor: "#F5F5F5",
@@ -470,6 +689,7 @@ index 0000000..d9434be
 +				data: $data_json_array,
 +				legend: {
 +					cursor: "pointer",
++					fontSize: 20,
 +					itemclick: function (e) {
 +						if (typeof (e.dataSeries.visible) === "undefined" || e.dataSeries.visible) {
 +							e.dataSeries.visible = false;
@@ -483,29 +703,70 @@ index 0000000..d9434be
 +			});
 +
 +			chart.render();
++
++			doMore();
 +		}
++
++		function doMore(){}
 +	</script>
++    <script type="text/javascript">
++        //:more_script $more_script
++    </script>
++    <script src="/static/jquery-1.11.1.min.js"></script>
 +    <script src="/static/canvasjs.min.js"></script>
 +    <script src="/static/jquery.canvasjs.min.js"></script>
 +    <title>$page_title</title>
 +</head>
 +
 +<body>
-+ <div id="chartContainer1" style="width: 80%; height: 800px;display: inline-block;"></div>
++    <div id="chartContainer1" style="width: 90%; height: 900px;display: inline-block;"></div>
++    <div id="more"></div>
 +</body>
 +
 +</html>
 \ No newline at end of file
-diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo
+diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-more-compare.js b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-more-compare.js
 new file mode 100644
-index 0000000..f3b9152
+index 0000000..73e285e
 --- /dev/null
-+++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/result.demo
-@@ -0,0 +1,4 @@
-+model 	device_count 	avg_count 	05_count 	10_count 	15_count 	20_count 	25_count 	30_count 	35_count 	40_count 	45_count 	50_count 	55_count 	60_count 	65_count 	70_count 	75_count 	80_count 	85_count 	90_count 	95_count 	96_count 	97_count 	98_count 	99_count 	100_count 	total_time_per_device 	05_time 	10_time 	15_time 	20_time 	25_time 	30_time 	35_time 	40_time 	45_time 	50_time 	55_time 	60_time 	65_time 	70_time 	75_time 	80_time 	85_time 	90_time 	95_time 	96_time 	97_time 	98_time 	99_time 	100_time
-+MI4LTE 	115068 	88.7 	5.0 	10.0 	16.0 	22.0 	28.0 	34.0 	41.0 	48.0 	56.0 	65.0 	74.0 	85.0 	97.0 	111.0 	126.0 	145.0 	167.0 	199.0 	251.0 	268.0 	290.0 	320.0 	369.33 	1855.0 	34.33s 	1.46s 	3.12s 	4.92s 	6.76s 	8.77s 	10.82s 	13.03s 	15.4s 	18.03s 	20.97s 	24.24s 	27.97s 	32.17s 	37.28s 	43.45s 	51.1s 	61.48s 	76.4s 	105.94s 	116.88s 	132.6s 	156.03s 	210.93s 	1293.37s
-+MINOTELTE 	85237 	96.94 	6.0 	13.0 	20.0 	27.0 	34.0 	42.0 	49.0 	57.0 	66.0 	75.0 	85.0 	97.0 	109.0 	123.0 	138.0 	156.0 	178.0 	209.0 	259.0 	276.0 	295.0 	324.0 	366.0 	1132.0 	35.5s 	1.8s 	3.84s 	5.9s 	7.98s 	10.08s 	12.34s 	14.68s 	17.22s 	19.96s 	22.94s 	26.24s 	29.97s 	34.28s 	39.19s 	45.03s 	52.29s 	62.22s 	77.11s 	104.98s 	115.7s 	129.19s 	153.21s 	205.2s 	1877.79s
-+MI5 	82262 	76.57 	7.0 	13.0 	19.0 	24.2 	30.0 	35.0 	41.0 	47.0 	53.0 	60.0 	67.0 	75.0 	83.0 	94.0 	106.0 	120.0 	138.0 	161.0 	202.0 	215.0 	232.0 	256.0 	297.0 	925.0 	26.5s 	1.68s 	3.37s 	4.98s 	6.5s 	8.03s 	9.58s 	11.22s 	12.99s 	14.85s 	16.85s 	19.02s 	21.43s 	24.26s 	27.64s 	31.64s 	36.89s 	43.94s 	54.74s 	76.97s 	85.41s 	97.63s 	116.96s 	168.48s 	1098.47s
++++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/v-more-compare.js
+@@ -0,0 +1,36 @@
++function doMore() {
++    var params = getUrlVars();
++    $("#more").append("<form name=\"input\" id=\"form\" method=\"get\" action=\"/chart/chart-compare\">"+
++        "重新指定<select id=\"modelSelect\" onchange=\"onModelChange()\"></select>"+
++        "<input type=\"hidden\" value=\""+params["folder"]+"\" name=\"folder\" />"+
++        "<input type=\"hidden\" value=\""+params["file1"]+"\" name=\"file1\" />"+
++        "<input type=\"hidden\" value=\""+params["file2"]+"\" name=\"file2\" />"+
++        "<input type=\"text\" id=\"text\" name=\"model\"></input>"+
++        "<input type=\"submit\" value=\"Submit\">"+
++        "</form>");
++	$.getJSON("/chart/list/model?folderName=" + params["folder"] + "&fileName=" + params["file1"], function(data) {
++        writeOptions(data, "modelSelect");
++    });
++}
++
++function getUrlVars() {
++    var vars = [], hash;
++    var hashes = decodeURI(window.location.href).slice(window.location.href.indexOf('?') + 1).split('&');
++    for(var i = 0; i < hashes.length; i++)
++    {
++        hash = hashes[i].split('=');
++        vars.push(hash[0]);
++        vars[hash[0]] = hash[1];
++    }
++    return vars;
++}
++
++function writeOptions(data, item) {
++    $.each(data, function(i, v) {
++        $("#" + item).append("<option value=\"" + v + "\">" + v + "</option>");
++    });
++}
++
++function onModelChange() {
++    $("#text").val($("#modelSelect").val());
++}
 \ No newline at end of file
 diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/value-template.txt b/Micloud-BaseServices/MicloudAPI-Find/src/main/resources/value-template.txt
 new file mode 100644
@@ -1821,12 +2082,84 @@ index 0000000..525be26
 + Copyright 2013 fenopix
 +*/
 +(function(b,c,d,e){b.fn.CanvasJSChart=function(a){if(a){var b=this.first();a=new CanvasJS.Chart(this[0],a);b.children(".canvasjs-chart-container").data("canvasjsChartRef",a);a.render();return this}return this.first().children(".canvasjs-chart-container").data("canvasjsChartRef")}})(jQuery,window,document);
+diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/compare.html b/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/compare.html
+new file mode 100644
+index 0000000..e84fd63
+--- /dev/null
++++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/compare.html
+@@ -0,0 +1,65 @@
++<html lang="en">
++<head>
++    <meta charset="UTF-8">
++    <title>对比图表页面</title>
++    <script type="text/javascript" src="/static/jquery-1.11.1.min.js"></script>
++    <script type="text/javascript">
++		window.onload = function() {
++		    $.getJSON("/chart/folders", function(data) {
++		        $.each(data, function(i, v) {
++		            $("#folder-list").append("<option value=\"" + v + "\">" + v + "</option>");
++		        });
++		    });
++		};
++	</script>
++    <script type="text/javascript">
++		function writeOptions(data, item) {
++		    $.each(data, function(i, v) {
++		        $("#" + item).append("<option value=\"" + v + "\">" + v + "</option>");
++		    });
++		}
++
++		function onFolderNameChange() {
++		    $.getJSON("/chart/folder/list?folderName=" + $("#folder-list").val(), function(data) {
++		        writeOptions(data, "file-list1");
++		        writeOptions(data, "file-list2");
++		    });
++		}
++
++        function onFile1Change() {
++		    $.getJSON("/chart/list/model?folderName=" + $("#folder-list").val() + "&fileName=" + $("#file-list1").val(), function(data) {
++		        writeOptions(data, "model");
++		    });
++        }
++    </script>
++</head>
++<body>
++<form name="input" id="form" method="get" action="/chart/chart-compare">
++    <div>
++        选择目录
++        <select name="folder" id="folder-list" onchange="onFolderNameChange()">
++            <option value="">请选择</option>
++        </select>
++    </div>
++    <div>
++        选择文件
++        <select name="file1" id="file-list1" onchange="onFile1Change()">
++            <option value="">请选择</option>
++        </select>
++    </div>
++    <div>
++        选择文件
++        <select name="file2" id="file-list2">
++            <option value="">请选择</option>
++        </select>
++    </div>
++    <div>
++        选择model
++        <select name="model" id="model">
++            <option value="">请选择</option>
++        </select>
++    </div>
++    <input type="submit" value="Submit">
++</form>
++</body>
++</html>
+\ No newline at end of file
 diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/upload.html b/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/upload.html
 new file mode 100644
-index 0000000..f7a3c29
+index 0000000..da650d5
 --- /dev/null
 +++ b/Micloud-BaseServices/MicloudAPI-Find/src/main/webapp/views/upload.html
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,48 @@
 +<html lang="en">
 +<head>
 +    <meta charset="UTF-8">
@@ -1861,6 +2194,7 @@ index 0000000..f7a3c29
 +            <input type="radio" name="type" value="column">柱状图
 +        </div>
 +        x轴:起点(组)列号<input type="text" name="x_start">-终点(x轴)列号<input type="text" name="x_end"><br>
++        x轴过滤(逗号分割)<input type="text" name="x_filter"><br>
 +        x坐标正则:<input type="text" name="x_format"><br>
 +        y轴:列号<input type="text" name="y"><br>
 +        x显示单位:<input type="text" name="label_unit"><br>
@@ -1875,3 +2209,29 @@ index 0000000..f7a3c29
 +</body>
 +</html>
 \ No newline at end of file
+diff --git a/Micloud-BaseServices/MicloudAPI-Find/src/test/java/com/xiaomi/micloud/util/SomeTest.java b/Micloud-BaseServices/MicloudAPI-Find/src/test/java/com/xiaomi/micloud/util/SomeTest.java
+new file mode 100644
+index 0000000..d099377
+--- /dev/null
++++ b/Micloud-BaseServices/MicloudAPI-Find/src/test/java/com/xiaomi/micloud/util/SomeTest.java
+@@ -0,0 +1,20 @@
++package com.xiaomi.micloud.util;
++
++import org.junit.Test;
++
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++/**
++ * Created by liushuai on 17-1-5.
++ */
++public class SomeTest {
++
++    @Test
++    public void testRegex() throws Exception {
++        Pattern namePattern = Pattern.compile("name: \"(.+)\",");
++        String data = " name: \"Redmi4A(rolex)-in(6.12.22-1229-0102-good)\", ";
++        Matcher matcher = namePattern.matcher(data);
++        System.out.println(matcher.find());
++    }
++}
